@@ -5,8 +5,9 @@ import numpy as np
 from bokeh.resources import CDN
 from bokeh.models.widgets import Div
 from bokeh.plotting import figure
-from bokeh.models import Label
+from bokeh.models import Label, ColumnDataSource
 from bokeh.embed import file_html
+from bokeh.layouts import column
 
 from datetime import timedelta
 from colour import Color
@@ -14,6 +15,18 @@ from colour import Color
 from math import pi, tan
 
 from . import structs
+
+# Import cursor delta addon functionality
+import sys
+cursor_addon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cursor_delta_addon.py')
+if os.path.exists(cursor_addon_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cursor_delta_addon", cursor_addon_path)
+    cursor_delta_addon = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cursor_delta_addon)
+    HAS_CURSOR_ADDON = True
+else:
+    HAS_CURSOR_ADDON = False
 
 css_hack = '''
 .dataframe {
@@ -237,16 +250,16 @@ def plot_graph_bokeh(results):
     "RESISTANCE and SUPPORT" if results["trend_type"] == "BOTH" else results["trend_type"],
     candlestick_data.time_interval_min(),
   )
-  
-  
+
+
   # Establish plot dimensions
   y_padding = (candles_df['High'].max() / 200)
   y_range_top = candles_df['Low'].min() - y_padding
   y_range_bottom = candles_df['High'].max() + y_padding
   x_range_left = -1
   x_range_right = len(candles_df) + 10
-  
-  
+
+
   # Plot candlestick chart
   inc = candles_df.Close > candles_df.Open
   dec = candles_df.Open > candles_df.Close
@@ -260,7 +273,7 @@ def plot_graph_bokeh(results):
     y_range=(y_range_top, y_range_bottom),
     x_range=(x_range_left, x_range_right),
   )
-  
+
   p.xaxis.major_label_overrides = {
     i: date.strftime('%b %d %H:%M') for i, date in enumerate(candles_df['Date'])
   }
@@ -271,17 +284,39 @@ def plot_graph_bokeh(results):
   p.vbar(candles_df.index[inc], w, candles_df.Open[inc], candles_df.Close[inc], fill_color="#D5E1DD", line_color="black")
   p.vbar(candles_df.index[dec], w, candles_df.Open[dec], candles_df.Close[dec], fill_color="#F2583E", line_color="black")
 
+  # Collect trendline segments for cursor delta addon
+  res_segments = []
+  sup_segments = []
+
   # Plot trendlines (support)
   if 'support_trendlines' in results:
     for _, result_row in results['support_trendlines'].iterrows():
       tf = TrendlineFigure(structs.TrendlineTypes.SUPPORT, result_row)
       tf.plot_figure(p, candles_df)
+      # Extract segment data for cursor addon
+      if len(result_row['pointset_dates']) >= 2:
+        x0 = result_row['pointset_dates'][0]
+        x1 = result_row['pointset_dates'][-1]
+        x0_idx = candles_df.loc[candles_df['Date'] == x0].index[0]
+        x1_idx = candles_df.loc[candles_df['Date'] == x1].index[0]
+        y0 = candles_df.iloc[x0_idx].Low
+        y1 = candles_df.iloc[x1_idx].Low
+        sup_segments.append((x0, y0, x1, y1))
 
   # Plot trendlines (resistsance)
   if 'resistance_trendlines' in results:
     for _, result_row in results['resistance_trendlines'].iterrows():
       tf = TrendlineFigure(structs.TrendlineTypes.RESISTANCE, result_row)
       tf.plot_figure(p, candles_df)
+      # Extract segment data for cursor addon
+      if len(result_row['pointset_dates']) >= 2:
+        x0 = result_row['pointset_dates'][0]
+        x1 = result_row['pointset_dates'][-1]
+        x0_idx = candles_df.loc[candles_df['Date'] == x0].index[0]
+        x1_idx = candles_df.loc[candles_df['Date'] == x1].index[0]
+        y0 = candles_df.iloc[x0_idx].High
+        y1 = candles_df.iloc[x1_idx].High
+        res_segments.append((x0, y0, x1, y1))
 
   # Draw vertical lines at first and last price
   _draw_bidirectional_ray(p, candles_df.index[0] - 0.5, 0, 90, "#bbbbbb")
@@ -297,7 +332,25 @@ def plot_graph_bokeh(results):
   # Styling nits
   p.title.text_font_size = '16pt'
 
-  return p
+  # Add cursor delta panel if addon is available
+  cursor_panel = None
+  if HAS_CURSOR_ADDON:
+    try:
+      # Create ColumnDataSource for candlestick data
+      candle_src = ColumnDataSource({
+        'Date': [int(pd.to_datetime(d).value // 10**6) for d in candles_df['Date']],
+        'Open': candles_df['Open'].values,
+        'High': candles_df['High'].values,
+        'Low': candles_df['Low'].values,
+        'Close': candles_df['Close'].values
+      })
+
+      res_src, sup_src = cursor_delta_addon.build_sources(res_segments, sup_segments)
+      cursor_panel = cursor_delta_addon.attach_cursor_panel(p, res_src, sup_src, candle_src)
+    except Exception as e:
+      print(f"Warning: Could not attach cursor delta panel: {e}")
+
+  return p, cursor_panel
 
 def plot_table_bokeh(results):
   if results['trend_type'] == structs.TrendlineTypes.BOTH:
@@ -332,14 +385,20 @@ def plot(
     raise Exception("results argument for plot needs to be output of detect(...)")
 
   # Plot candlestick graph with trendlines
-  trend_graph = plot_graph_bokeh(results)
+  trend_graph, cursor_panel = plot_graph_bokeh(results)
 
   # Plot trendline results dataframe below the plot
   trend_table = plot_table_bokeh(results)
 
+  # Create layout with cursor panel if available
+  if cursor_panel is not None:
+    layout = column(trend_graph, cursor_panel, trend_table)
+  else:
+    layout = column(trend_graph, trend_table)
+
   # Get HTML content
   filepath = filedir + '/' + filename
-  html_content = file_html(models=(trend_graph, trend_table), resources=(CDN), title="pytrendline results")
+  html_content = file_html(models=layout, resources=(CDN), title="pytrendline results")
 
   # Hack in extra styles to HTML
   html_content = html_content.replace('<head>', '<head><style class="custom" type="text/css">{}</style>'.format(css_hack))
@@ -347,5 +406,5 @@ def plot(
   # Write HTML to file
   with open(filepath, 'w') as outfile:
     outfile.write(html_content)
-  
+
   return filepath

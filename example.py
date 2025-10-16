@@ -4,7 +4,7 @@ import os
 import time
 
 # 1. Construct candlestick data. This example just grabs data from a fixture
-candles_df = pd.read_csv('./fixtures/example.csv')
+candles_df = pd.read_csv('./data/aapl_1h.csv')
 candles_df.set_index('Idx')
 candles_df['Date'] = pd.to_datetime(candles_df['Date'])
 
