@@ -12,7 +12,7 @@ import time
 # - MEDIUM: Balanced - fewer, bigger zones (±12% tolerance, 4 touches min) ⭐ RECOMMENDED
 # - LOOSE: Few large support zones (±20% tolerance, 5 touches min)
 
-SENSITIVITY = "tight"  # ← Change this to "tight", "medium", or "loose"
+SENSITIVITY = "loose"  # ← Change this to "tight", "medium", or "loose"
 
 # Define sensitivity presets
 SENSITIVITY_PRESETS = {
